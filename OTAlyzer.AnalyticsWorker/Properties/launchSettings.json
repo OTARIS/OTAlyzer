@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "OTAlyzer.AnalyticsWorker": {
+      "commandName": "Project",
+      "commandLineArgs": "-p ..\\..\\OTALyzerUI\\examples\\A01_01.mitm -k ..\\..\\OTALyzerUI\\examples\\matchall.txt -s ..\\..\\OTALyzerUi\\examples\\matchall_severity.txt --filename out",
+      "workingDirectory": "C:\\Users\\rath\\Documents\\Repos\\OTALyzer\\OTAlyzer.AnalyticsWorker"
+    }
+  }
+}

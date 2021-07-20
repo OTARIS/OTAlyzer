@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "OTAlyzer.AnalyticsWorker": {
+      "commandName": "Project",
+      "commandLineArgs": "--help",
+      "workingDirectory": ".."
+    }
+  }
+}

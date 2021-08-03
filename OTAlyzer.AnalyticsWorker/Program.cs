@@ -50,8 +50,6 @@ namespace OTAlyzer.AnalyticsWorker
         }
 
         private class Options {
-            public bool DecryptTls { get; set; } = false;
-            public bool InCiPipeline { get; set; } = false;
 
             [Option('f', "filename", Required = true, HelpText = "The name of the output file.")]
             public string OutputFile { get; set; }
@@ -71,8 +69,11 @@ namespace OTAlyzer.AnalyticsWorker
             [Option("blacklist", Separator=',', HelpText = "Comma separated list of files tp be used as blacklists for urls (e.g. trackers) and checks for plaintext occurences (to be used with large lists of URLs/IPs).")]
             public IEnumerable<String> BlacklistFiles { get; set; }
 
-            [Option("severity-threshold", HelpText = "Exit with error on a finding with a severity level higher than the threshold set. To be used for CI pipelines.")]
+            [Option("severity-threshold", HelpText = "Exit with error on a finding with a severity level higher than the threshold set. To be used for CI pipelines. Can be set from 1-10.")]
             public int Threshold { get; set; }
+
+            [Option('v', "display-findings", HelpText = "Display all findings on finishing an analysis")]
+            public bool DisplayFindings { get; set; }
 
             [Usage(ApplicationAlias = "otalyzerworker")]
             public static IEnumerable<Example> Examples
@@ -163,7 +164,8 @@ namespace OTAlyzer.AnalyticsWorker
             ConcurrentBag<Finding> findings = new ConcurrentBag<Finding>();
 
             MitmAnalyzer mitmAnalyzer = new MitmAnalyzer();
-            TsharkWrapper pcapAnalyzer = new TsharkWrapper(otalyzerOptions.TrafficCaptureFile, otalyzerOptions.DecryptTls, otalyzerOptions.Sslkeylogfile);
+            bool decryptTls = otalyzerOptions.Sslkeylogfile != null;
+            TsharkWrapper pcapAnalyzer = new TsharkWrapper(otalyzerOptions.TrafficCaptureFile, decryptTls, otalyzerOptions.Sslkeylogfile);
 
             using AnalyzationManager analyzationManager = new AnalyzationManager(keywordSearchers, keywordList);
             // forward the callback into FindingBuilder.Build to create findings
@@ -228,7 +230,7 @@ namespace OTAlyzer.AnalyticsWorker
             {
                 Logger.LogAlert("No matches found");
 
-                if (!otalyzerOptions.InCiPipeline)
+                if (otalyzerOptions.Threshold != 0)
                 {
                     return (int)OtalyzerExit.NO_MATCHES_FOUND;
                 }
@@ -242,6 +244,13 @@ namespace OTAlyzer.AnalyticsWorker
 
             // Display results
             //---------------------------------------------------------------------------------------------------------
+            if (otalyzerOptions.DisplayFindings) {
+                foreach (Finding f in findings)
+                {
+                    Logger.LogAlert($"{string.Join(", ", f.MatchedKeywords.Keys)} -- {f.SourceIp}->{f.DestinationIp}. Encryption:{f.FindingType}. Https:{f.IsHttps} -- Severity: {f.SeverityLevel}!");
+                }
+            }
+
             Logger.LogPositive($"Found {filteredFindings.Count} matches to supplied keywords");
             Logger.LogPositive($"{nEncryptedFindings} TLS-encrypted / {filteredFindings.Count - nEncryptedFindings} unencrypted");
 
@@ -249,7 +258,7 @@ namespace OTAlyzer.AnalyticsWorker
             File.WriteAllText($"{otalyzerOptions.OutputFile}", JsonConvert.SerializeObject(outputData, Formatting.Indented));
             Logger.LogPositive($"Results saved to {otalyzerOptions.OutputFile}");
 
-            if (otalyzerOptions.InCiPipeline && CiShouldFail(otalyzerOptions.Threshold, filteredFindings))
+            if (otalyzerOptions.Threshold != 0 && CiShouldFail(filteredFindings))
             {
                 Logger.LogAlert("FAILED! See report for details!");
                 return (int)OtalyzerExit.CI_FAILED;
@@ -325,20 +334,19 @@ namespace OTAlyzer.AnalyticsWorker
             }
         }
 
-        private static bool CiShouldFail(int threshhold, IEnumerable<Finding> findings)
+        private static bool CiShouldFail(IEnumerable<Finding> findings)
         {
-            bool ciShouldFail = false;
+            bool severityThresholdMet = false;
 
             foreach (Finding f in findings)
             {
-                if (f.SeverityLevel > threshhold)
+                if (f.SeverityLevel > otalyzerOptions.Threshold)
                 {
-                    ciShouldFail = true;
-                    Logger.LogAlert($"{string.Join(", ", f.MatchedKeywords.Keys)} -- {f.SourceIp}->{f.DestinationIp}. Encryption:{f.FindingType}. Https:{f.IsHttps} -- Severity: {f.SeverityLevel}!");
+                    severityThresholdMet = true;
                 }
             }
 
-            return ciShouldFail;
+            return severityThresholdMet;
         }
 
         private static List<Finding> FilterFindings(ConcurrentBag<Finding> findings)
@@ -399,7 +407,7 @@ namespace OTAlyzer.AnalyticsWorker
             {
                 Console.WriteLine("[ ] Starting tshark-wrapper to load PCAPNG");
 
-                if (otalyzerOptions.DecryptTls && !pcapAnalyzer.CheckKeylogFile())
+                if (otalyzerOptions.Sslkeylogfile != null && !pcapAnalyzer.CheckKeylogFile())
                 {
                     return (int)OtalyzerExit.INVALID_SSLKEYLOG_FILE;
                 }

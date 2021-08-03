@@ -8,7 +8,6 @@ using OTAlyzer.AnalyticsCore.Misc;
 using OTAlyzer.AnalyticsCore.Traffic.Mitmproxy;
 using OTAlyzer.AnalyticsCore.Traffic.Mitmproxy.Blocks;
 using OTAlyzer.AnalyticsCore.Traffic.Pcapng.Payloads;
-using OTAlyzer.AnalyticsWorker.Options;
 using OTAlyzer.Common;
 using System;
 using System.Collections.Concurrent;
@@ -18,14 +17,22 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using CommandLine;
+using CommandLine.Text;
 
 namespace OTAlyzer.AnalyticsWorker
 {
     internal static class Program
     {
-        private static bool IsMitmAnalysis = false;
-
-        private static int nEncryptedFindings = 0;
+        public static void DisplayBanner()
+        {
+            Console.WriteLine(" _____  ____   __    __   _  _  ____  ____  ____ ");
+            Console.WriteLine("(  _  )(_  _) /__\\  (  ) ( \\/ )(_   )( ___)(  _ \\");
+            Console.WriteLine(" )(_)(   )(  /(__)\\  )(__ \\  /  / /_  )__)  )   /");
+            Console.WriteLine("(_____) (__)(__)(__)(____)(__) (____)(____)(_)\\_)");
+            Console.WriteLine("\t>>> otaris traffic analyzer");
+            Console.WriteLine();
+        }
 
         private enum OtalyzerExit : int
         {
@@ -42,48 +49,70 @@ namespace OTAlyzer.AnalyticsWorker
             TSHARK_PARSING_FAILED,
         }
 
-        public static void DisplayBanner()
-        {
-            Console.WriteLine(" _____  ____   __    __   _  _  ____  ____  ____ ");
-            Console.WriteLine("(  _  )(_  _) /__\\  (  ) ( \\/ )(_   )( ___)(  _ \\");
-            Console.WriteLine(" )(_)(   )(  /(__)\\  )(__ \\  /  / /_  )__)  )   /");
-            Console.WriteLine("(_____) (__)(__)(__)(____)(__) (____)(____)(_)\\_)");
-            Console.WriteLine("\t>>> otaris traffic analyzer");
-            Console.WriteLine();
+        private class Options {
+            public bool DecryptTls { get; set; } = false;
+            public bool InCiPipeline { get; set; } = false;
+
+            [Option('f', "filename", Required = true, HelpText = "The name of the output file.")]
+            public string OutputFile { get; set; }
+
+            [Option('k', "keyword-file", Required = true, HelpText = "File containing search-keywords. You can use regex in a keyword with the $regex$ prefix. Example keyword file: { \"Post-Requests\":[\"POST\"], \"Credentials\":[\"$regex$.*@mail[.]com\"] }")]
+            public string KeywordListFile { get; set; }
+
+            [Option('s', "severity-level-file", Required = true, HelpText = "File specifiying the severity of each finding. An example severity level file could look like this: {\"Credentials\": { \"encrypted\": 2, \"unencrypted\": 10 } }")]
+            public string SeverityLevelFile { get; set; }
+
+            [Option('p', "pcap-file", Required = true, HelpText = "The .pcap[ng]/mitmproxy file to analyze.")]
+            public string TrafficCaptureFile { get; set; }
+
+            [Option('t', "tls", HelpText = "Use TLS-decryption using the credentials supplied in the file.")]
+            public string Sslkeylogfile { get; set; }
+
+            [Option("blacklist", Separator=',', HelpText = "Comma separated list of files tp be used as blacklists for urls (e.g. trackers) and checks for plaintext occurences (to be used with large lists of URLs/IPs).")]
+            public IEnumerable<String> BlacklistFiles { get; set; }
+
+            [Option("severity-threshold", HelpText = "Exit with error on a finding with a severity level higher than the threshold set. To be used for CI pipelines.")]
+            public int Threshold { get; set; }
+
+            [Usage(ApplicationAlias = "otalyzerworker")]
+            public static IEnumerable<Example> Examples
+            {
+                get
+                {
+                    yield return new Example("Minimal usage", new Options { KeywordListFile = "[KEYWORD_FILE]", SeverityLevelFile = "[SEVERITY_FILE]", TrafficCaptureFile = "[CAPTURE_FILE]", OutputFile = "[OUTFILE]"});
+                    yield return new Example("Example usage", new Options { KeywordListFile = "keywords/keywords.txt", SeverityLevelFile = "keywords/severity.txt", TrafficCaptureFile = "test.pcapng", OutputFile = "analysis", Sslkeylogfile = "sslkey.log"});  
+                }
+            }
         }
 
-        public static void DisplayUsage()
-        {
-            Console.WriteLine("Minimal usage: otalyzer -k [KEYWORD_FILE] -s [SEVERITY_FILE] -p [CAPTURE_FILE] --filename [OUTFILE]");
-            Console.WriteLine();
-            Console.WriteLine("Mandatory parameters:");
-            Console.WriteLine("-k | --keyword-file [file]: File containing search-keywords");
-            Console.WriteLine("-s | --severity-level-file [file]: File specifiying the severity of each finding");
-            Console.WriteLine("-p | --pcap-file [file]: The .pcap[ng]/mitmproxy file to analyze");
-            Console.WriteLine("--filename [filename]: The name of the output file");
-            Console.WriteLine();
-            Console.WriteLine("Other options:");
-            Console.WriteLine("--tls [sslkeylogfile]: Use TLS-decryption using the credentials supplied in the file");
-            Console.WriteLine("--severity-threshold [0-9] | Exit with error on a finding with a severity level higher than the threshold set. To be used for CI pipelines");
-            Console.WriteLine("--blacklist [filename{,filename,filename}] | Uses the files specified as blacklists for urls (e.g. trackers) and checks for plaintext occurences (to be used with large lists of URLs/IPs)");
-            Console.WriteLine("-h | --help | --usage: Display this message");
-            Console.WriteLine();
-            Console.WriteLine("Example usage: otalyzer --filename analysis -k keywords/keywords.txt -s keywords/severity.txt -p test.pcapng --tls sslkey.log");
-            Console.WriteLine();
-            Console.WriteLine("You can use regex in a keyword with the $regex$ prefix.");
-            Console.WriteLine("Example keyword file: { \"Post-Requests\":[\"POST\"], \"Credentials\":[\"$regex$.*@mail[.]com\"] }");
-            Console.WriteLine("An example severity level file could look like this: {\"Credentials\": { \"encrypted\": 2, \"unencrypted\": 10 } }");
-        }
+        private static bool IsMitmAnalysis = false;
+
+        private static int nEncryptedFindings = 0;
+        
+        private static Options otalyzerOptions;
 
         public static int Main(string[] args)
         {
-            if (!OptionsBuilder.TryParseCommandLineArguments(args, out OtalyzerOptions otalyzerOptions))
-            {
-                return (int)OtalyzerExit.WRONG_ARGUMENTS_SUPPLIED;
-            }
 
             DisplayBanner();
+            
+            var parsingFailed = false;
+            var parserResult = Parser.Default.ParseArguments<Options>(args)
+                .WithParsed<Options>(o =>
+                   {
+                       otalyzerOptions = o;
+                   }
+                )
+                .WithNotParsed(errors => {
+                    parsingFailed = true;
+                }); 
 
+            if (parsingFailed) {
+                HelpText.AutoBuild(parserResult);
+                return (int)OtalyzerExit.WRONG_ARGUMENTS_SUPPLIED;
+            }
+ 
+            Console.WriteLine(otalyzerOptions.KeywordListFile);
             string jsonKeywords = File.ReadAllText(otalyzerOptions.KeywordListFile);
             string jsonSeverityLevels = File.ReadAllText(otalyzerOptions.SeverityLevelFile);
 
@@ -143,7 +172,7 @@ namespace OTAlyzer.AnalyticsWorker
 
             // Parse packets
             //---------------------------------------------------------------------------------------------------------
-            int ret = ParsePacketPayloads(pcapAnalyzer, mitmAnalyzer, otalyzerOptions);
+            int ret = ParsePacketPayloads(pcapAnalyzer, mitmAnalyzer);
 
             if (ret != 0)
             {
@@ -357,7 +386,7 @@ namespace OTAlyzer.AnalyticsWorker
             return filteredFindings;
         }
 
-        private static int ParsePacketPayloads(TsharkWrapper pcapAnalyzer, MitmAnalyzer mitmAnalyzer, OtalyzerOptions otalyzerOptions)
+        private static int ParsePacketPayloads(TsharkWrapper pcapAnalyzer, MitmAnalyzer mitmAnalyzer)
         {
             // check whether pcap or mitm
             string extension = Path.GetExtension(otalyzerOptions.TrafficCaptureFile);
